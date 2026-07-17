@@ -1,0 +1,86 @@
+services:
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: dev
+      MYSQL_DATABASE: marketplace
+    ports:
+      - "3306:3306"
+    healthcheck:
+      # A container that is RUNNING is not a database that is READY. mysqld
+      # accepts a TCP connection seconds before it will accept a query, and
+      # `depends_on` without this check gives you a flaky boot every time.
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-pdev"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+
+  migrate:
+    image: mysql:8.0
+    depends_on:
+      mysql:
+        condition: service_healthy
+    volumes:
+      - ./schema.sql:/schema.sql:ro
+    command: >
+      sh -c "mysql -h mysql -uroot -pdev marketplace < /schema.sql"
+
+  pricing:
+    build: .
+    command: ["python", "-m", "pricing.server"]
+    environment:
+      REDIS_URL: "redis://redis:6379/0"
+      PRICING_PORT: "50051"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  api:
+    build: .
+    command: ["uvicorn", "dispatch.api:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment: &backend_env
+      REDIS_URL: "redis://redis:6379/0"
+      MYSQL_HOST: "mysql"
+      MYSQL_USER: "root"
+      MYSQL_PASSWORD: "dev"
+      MYSQL_DB: "marketplace"
+      PRICING_ADDR: "pricing:50051"
+    ports:
+      - "8000:8000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  matcher:
+    build: .
+    command: ["python", "-m", "dispatch.run_matcher"]
+    environment: *backend_env
+    # Three replicas locally, on purpose: the double-booking race from step 5
+    # is only REAL when more than one matcher is draining the queue. A
+    # single-replica local stack cannot reproduce the bug it is defending
+    # against, and a defence you never see fire is a defence you do not trust.
+    deploy:
+      replicas: 3
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      pricing:
+        condition: service_started
+      migrate:
+        condition: service_completed_successfully

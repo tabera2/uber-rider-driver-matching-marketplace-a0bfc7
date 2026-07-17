@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+package marketplace.pricing.v1;
+
+// The contract between dispatch and pricing. This file is the ONLY thing the
+// two services agree on — neither imports the other's Python. Change this file
+// and you are changing an API; change either service's internals and you are
+// not. That distinction is the entire reason for a service boundary.
+service Pricing {
+  // Quote a fare for one trip. Must be fast: it sits on the matching path,
+  // and dispatch holds a driver claim while it waits for the answer.
+  rpc Quote(QuoteRequest) returns (QuoteResponse);
+}
+
+message LatLng {
+  double lat = 1;
+  double lng = 2;
+}
+
+message QuoteRequest {
+  LatLng pickup = 1;
+  LatLng driver = 2;
+  // Straight-line metres from driver to pickup. Dispatch already computed this
+  // when it ranked candidates, so we pass it rather than recomputing.
+  double pickup_distance_m = 3;
+}
+
+message QuoteResponse {
+  int32 fare_cents = 1;
+  // The surge multiplier applied, in basis points (10000 = 1.0x). Integers,
+  // not floats: a fare a rider is charged must be exactly reproducible, and
+  // float multiplication is not.
+  int32 surge_bps = 2;
+}

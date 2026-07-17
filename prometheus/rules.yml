@@ -1,0 +1,70 @@
+groups:
+  - name: marketplace
+    interval: 15s
+    rules:
+      # ---- recording rules: precompute the expensive queries ---------------
+
+      # p99 match latency. histogram_quantile over the rate of bucket counters
+      # is the ONLY correct way to get a percentile from a Prometheus histogram
+      # — you cannot average a percentile, and you cannot percentile an average.
+      - record: dispatch:match_latency_p99
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (le) (rate(dispatch_match_seconds_bucket[5m]))
+          )
+
+      # The fraction of match attempts that actually produced a car. This is the
+      # closest thing this system has to a business KPI, and it is what you
+      # should page on — not CPU, not memory, not pod restarts.
+      - record: dispatch:match_success_ratio
+        expr: |
+          sum(rate(dispatch_matches_total{outcome="matched"}[5m]))
+          /
+          clamp_min(sum(rate(dispatch_matches_total[5m])), 0.001)
+
+      - record: dispatch:pricing_fallback_ratio
+        expr: |
+          sum(rate(dispatch_pricing_fallback_total[5m]))
+          /
+          clamp_min(sum(rate(dispatch_matches_total{outcome="matched"}[5m])), 0.001)
+
+      # ---- alerts: on SYMPTOMS the rider feels, not on causes --------------
+
+      - alert: RidersNotGettingCars
+        expr: dispatch:match_success_ratio < 0.90
+        for: 3m
+        labels: { severity: page }
+        annotations:
+          summary: "Under 90% of match attempts are producing a car"
+          runbook: "RUNBOOK.md#riders-not-getting-cars"
+
+      # The queue is an integral: a positive derivative means arrivals exceed
+      # service, and it will NOT recover on its own. deriv() over 10m is the
+      # honest question — is the backlog growing? — and it fires long before
+      # latency looks bad, because latency is a lagging indicator of a backlog.
+      - alert: BacklogGrowing
+        expr: deriv(dispatch_queue_depth[10m]) > 0.5
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: "Pending-trip queue is growing; matchers cannot keep up"
+          runbook: "RUNBOOK.md#backlog-growing"
+
+      # Claims held should oscillate with live trips. A monotonic climb means
+      # claims are being leaked — the silent failure with no error to log.
+      - alert: ClaimsLeaking
+        expr: deriv(dispatch_claims_held[30m]) > 0 and dispatch_claims_held > 100
+        for: 15m
+        labels: { severity: ticket }
+        annotations:
+          summary: "Driver claims are only going up; suspected claim leak"
+          runbook: "RUNBOOK.md#claims-leaking"
+
+      - alert: PricingDegraded
+        expr: dispatch:pricing_fallback_ratio > 0.10
+        for: 5m
+        labels: { severity: ticket }
+        annotations:
+          summary: "Over 10% of fares are coming from the local fallback"
+          runbook: "RUNBOOK.md#pricing-degraded"

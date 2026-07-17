@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pricing
+  labels: { app: pricing }
+spec:
+  replicas: 3
+  selector:
+    matchLabels: { app: pricing }
+  template:
+    metadata:
+      labels: { app: pricing }
+    spec:
+      terminationGracePeriodSeconds: 20
+      containers:
+        - name: pricing
+          image: marketplace:latest
+          command: ["python", "-m", "pricing.server"]
+          ports:
+            - containerPort: 50051
+              name: grpc
+          envFrom:
+            - configMapRef: { name: marketplace-config }
+          # gRPC has a native health protocol; kubelet speaks it directly since
+          # v1.24. No HTTP sidecar, no exec-ing grpc_health_probe into the image.
+          livenessProbe:
+            grpc: { port: 50051 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            grpc: { port: 50051 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests: { cpu: "200m", memory: "192Mi" }
+            limits:   { cpu: "500m", memory: "384Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pricing
+spec:
+  # A HEADLESS service. This is not a detail — read the segment. A normal
+  # ClusterIP load-balances TCP CONNECTIONS, and gRPC opens ONE long-lived
+  # HTTP/2 connection and multiplexes every RPC over it. So a normal Service
+  # would pin each matcher to exactly ONE pricing pod, forever. Headless
+  # returns all pod IPs and lets the gRPC client balance per-REQUEST.
+  clusterIP: None
+  selector: { app: pricing }
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: 50051
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: marketplace-config
+data:
+  REDIS_URL: "redis://redis:6379/0"
+  MYSQL_HOST: "mysql"
+  MYSQL_DB: "marketplace"
+  # dns:/// tells gRPC to resolve ALL A-records and round-robin across them.
+  PRICING_ADDR: "dns:///pricing:50051"
+  LOG_LEVEL: "INFO"

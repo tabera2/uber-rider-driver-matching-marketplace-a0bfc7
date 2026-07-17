@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dispatch-api
+  labels: { app: dispatch-api }
+spec:
+  replicas: 3
+  selector:
+    matchLabels: { app: dispatch-api }
+  template:
+    metadata:
+      labels: { app: dispatch-api }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      # Long enough to finish any in-flight HTTP request AND to let the preStop
+      # sleep drain the endpoints list. If this is shorter than your real work,
+      # Kubernetes SIGKILLs you mid-request on every single deploy.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: api
+          image: marketplace:latest
+          command: ["uvicorn", "dispatch.api:app", "--host", "0.0.0.0", "--port", "8000"]
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef: { name: marketplace-config }
+            - secretRef: { name: marketplace-secrets }
+
+          # LIVENESS: "is this PROCESS wedged?" Nothing else. It must NOT check
+          # MySQL or Redis — if it did, a MySQL blip would make every api pod
+          # fail liveness, get killed, and restart, turning a database hiccup
+          # into a full application outage. Restarting the pod cannot fix MySQL.
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8000 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+
+          # READINESS: "can I SERVE a request right now?" This one DOES check
+          # dependencies. When MySQL is down, we go NotReady, Kubernetes pulls
+          # us out of the Service endpoints, and traffic stops arriving — but
+          # the pod is NOT killed. It waits, recovers, and rejoins.
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8000 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            failureThreshold: 2
+
+          lifecycle:
+            preStop:
+              exec:
+                # The endpoints controller removes us from the Service
+                # ASYNCHRONOUSLY, and it can lose the race against SIGTERM. If
+                # we die instantly, in-flight requests are still being routed to
+                # a dead pod -> 502s on every deploy. Sleeping 5s lets the
+                # removal propagate BEFORE uvicorn stops accepting.
+                command: ["sh", "-c", "sleep 5"]
+
+          resources:
+            requests: { cpu: "200m", memory: "256Mi" }
+            limits:   { cpu: "1000m", memory: "512Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dispatch-api
+spec:
+  selector: { app: dispatch-api }
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000

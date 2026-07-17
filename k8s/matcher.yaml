@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: matcher
+  labels: { app: matcher }
+spec:
+  # Six matchers. They ALL drain the same Redis queue, and they ALL race for the
+  # same popular drivers. That is not a hazard to be avoided — it is the design.
+  # The atomic claim in step 5 is what makes horizontal scaling of the matcher
+  # safe, and this replica count is where that correctness gets cashed in.
+  replicas: 6
+  selector:
+    matchLabels: { app: matcher }
+  template:
+    metadata:
+      labels: { app: matcher }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
+    spec:
+      # The matcher has no inbound traffic to drain, but it DOES have an
+      # in-flight trip: a claimed driver and a pending pricing RPC. 30s is
+      # ~30x the worst-case trip, so SIGTERM always finds a clean seam.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: matcher
+          image: marketplace:latest
+          command: ["python", "-m", "dispatch.run_matcher"]
+          ports:
+            - containerPort: 9100
+              name: metrics
+          envFrom:
+            - configMapRef: { name: marketplace-config }
+            - secretRef: { name: marketplace-secrets }
+
+          # The matcher serves no traffic, so it has NO readiness probe — there
+          # is no Service to be removed from. It has only liveness: is the loop
+          # still alive? The metrics endpoint answers that, and nothing more.
+          livenessProbe:
+            httpGet: { path: /healthz, port: 9100 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+
+          resources:
+            requests: { cpu: "250m", memory: "256Mi" }
+            limits:   { cpu: "1000m", memory: "512Mi" }
